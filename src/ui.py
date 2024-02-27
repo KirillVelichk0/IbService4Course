@@ -155,6 +155,7 @@ class Server(BaseUI):
                 curVotingN = int(self.votesCountText.get())
                 curVotes = []
                 votingIsActive = True
+            self.show_info("Голосование успешно запущено")
         except Exception as e:
             print(e)
 
@@ -296,6 +297,12 @@ class Server(BaseUI):
                 global mutex
                 global votingIsActive
                 if vote_res[0]:
+                    votesFinal = "Не удалось определиться"
+                    if vote_res[1][0] > vote_res[1][1]:
+                        votesFinal = "Большинство проголовало за"
+                    elif vote_res[1][0] < vote_res[1][1]:
+                        votesFinal = "Большинство проголосовало против"
+                    self.show_info(votesFinal)
                     with mutex:
                         votingIsActive = False
                 print(vote_res)
@@ -407,13 +414,16 @@ class Client(BaseUI):
         if mode == "voting":
             vote = int(self.vote.get())
             if vote < 1 or vote > 3:
+                self.show_warning("Некорректный голос")
                 return
             if self.serverOpenKey is None:
+                self.show_warning("Вы не прошли авторизацию")
                 return
             vote = voting.CreateShadowedVote(vote, 10000, self.serverOpenKey)
             socket.send(
                 bytes(json.dumps({"title": mode, "vote": vote}), encoding="utf-8")
             )
+            self.show_info("Ваш голос успешно отправлен")
 
     def run_app(self) -> None:
         super().run_app()
