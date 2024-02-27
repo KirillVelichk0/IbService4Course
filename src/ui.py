@@ -10,8 +10,9 @@ from socket import AF_INET, socket, SOCK_STREAM
 from threading import Thread
 from RSA import Rsa
 from db_utils import *
-
+import voting
 import tkinter as tk
+import threading
 from tkinter import (
     Button as TkButton,
     Label as TkLabel,
@@ -21,6 +22,32 @@ from tkinter import (
     NORMAL,
     END,
 )
+
+votingIsActive = False
+server_voting_rsa = Rsa(512)
+curVotingN = 10
+curVotes: list[int] = []
+mutex = threading.Lock()
+
+
+def handle_new_vote(vote: int) -> tuple[bool, list]:
+    global curVotes
+    global mutex
+    global curVotingN
+    global votingIsActive
+    with mutex:
+        if (len(curVotes) < curVotingN) and votingIsActive:
+            curVotes.append(vote)
+            if len(curVotes) == curVotingN:
+                votingResult = voting.ExtractRealVotes(
+                    curVotes, server_voting_rsa.private_key
+                )
+                curVotes = []
+                votingIsActive = False
+                return (True, votingResult)
+        else:
+            raise ValueError("Voting is stopped")
+    return (False, [])
 
 
 def randomword(length: int) -> str:
@@ -87,7 +114,7 @@ class BaseUI(ABC):
         mb.showinfo("Информация", message)
 
     @abstractmethod
-    def send(self, mode: str, data=None):
+    def send(self, mode: str, socket, data=None):
         pass
 
     def run_app(self) -> None:
@@ -103,11 +130,12 @@ class Server(BaseUI):
         self.ACCEPT_THREAD = None
         self.addresses = {}
         self.data = []
-
+        self.authed_users = {}
+        self.authMutex = threading.Lock()
         self.rsa = None
 
         bit_len_str = tk.StringVar()
-        self.bit_length = TkEntry(self.root, textvariable=bit_len_str)
+        self.bit_length = TkEntry(self.root)
         bit_len_str.set("Введите количество бит")
         self.p_text = TkTextbox(self.root, state="disabled", width=4, height=3)
         self.q_text = TkTextbox(self.root, state="disabled", width=4, height=3)
@@ -115,6 +143,20 @@ class Server(BaseUI):
         self.phi_text = TkTextbox(self.root, state="disabled", width=4, height=3)
         self.e_text = TkTextbox(self.root, state="disabled", width=4, height=3)
         self.d_text = TkTextbox(self.root, state="disabled", width=4, height=3)
+        self.votesCountText = TkEntry(self.root)
+
+    def start_voiting(self):
+        global mutex
+        global curVotingN
+        global curVotes
+        global votingIsActive
+        try:
+            with mutex:
+                curVotingN = int(self.votesCountText.get())
+                curVotes = []
+                votingIsActive = True
+        except Exception as e:
+            print(e)
 
     def draw_server_widgets(self) -> None:
         TkLabel(self.root, text="Количество бит:", font=("Teja", 20)).grid(
@@ -162,6 +204,12 @@ class Server(BaseUI):
         TkButton(
             self.root, text="Записать", command=lambda: self.write_database()
         ).grid(row=13, column=4, padx=20, pady=5)
+        self.votesCountText.grid(row=14, column=0)
+        TkButton(
+            self.root,
+            text="Начинаем голосование!",
+            command=lambda: self.start_voiting(),
+        ).grid(row=14, column=4)
 
     def generate_rsa_parameters(self) -> None:
         try:
@@ -218,7 +266,7 @@ class Server(BaseUI):
             json_acceptable_string = msg.replace("'", '"')
             data = json.loads(json_acceptable_string)
             if data["title"] == "check_login":
-                self.send(mode="login_answer", data=data["login"])
+                self.send("login_answer", client, data=data["login"])
             if data["title"] == "super_hash":
                 login = data["login"]
                 h_client = data["h"]
@@ -229,10 +277,30 @@ class Server(BaseUI):
                 ).hexdigest()
                 if h_server == h_client:
                     self.show_info("Супер хеши совпадают")
+                    with self.authMutex:
+                        self.authed_users[client] = True
+                        self.send(
+                            "super_hash_answer",
+                            client,
+                            str(server_voting_rsa.public_key),
+                        )
+
                 else:
                     self.show_warning("Супер хеши не совпадают")
+                    self.send("super_hash_answer", client, "")
+            if data["title"] == "voting":
+                with self.authMutex:
+                    if client not in self.authed_users:
+                        continue
+                vote_res = handle_new_vote(int(data["vote"]))
+                global mutex
+                global votingIsActive
+                if vote_res[0]:
+                    with mutex:
+                        votingIsActive = False
+                print(vote_res)
 
-    def send(self, mode: str, data: str | None = None) -> None:
+    def send(self, mode: str, socket, data: str | None = None) -> None:
         if data is None:
             raise ValueError("Login data is none")
         if mode == "login_answer":
@@ -241,9 +309,14 @@ class Server(BaseUI):
                 data = json.dumps({"title": "login_answer", "result": True, "w": w})
             else:
                 data = json.dumps({"title": "login_answer", "result": False})
-            for clients in self.addresses:
-                clients.send(bytes(data, encoding="utf-8"))
+            socket.send(bytes(data, encoding="utf-8"))
             time.sleep(0.2)
+        if mode == "super_hash_answer":
+            # data must be json string
+            data = json.dumps({"title": mode, "data": data})
+            socket.send(bytes(data, encoding="utf-8"))
+            time.sleep(0.2)
+            ...
 
     def run_app(self) -> None:
         super().run_app()
@@ -255,16 +328,17 @@ class Server(BaseUI):
 class Client(BaseUI):
     def __init__(self, title="Клиент"):
         super().__init__(title)
-
+        self.serverOpenKey = None
         self.client_socket = socket(AF_INET, SOCK_STREAM)
         self.client_socket.connect(self.ADDR)
         self.w_text = TkTextbox(self.root, state="disabled", width=4, height=3)
+        self.vote = TkEntry(self.root)
 
     def draw_client_widgets(self) -> None:
         TkButton(
             self.root,
             text="Отправить логин",
-            command=lambda: self.send(mode="check_login"),
+            command=lambda: self.send("check_login", self.client_socket),
         ).grid(row=0, column=5, padx=20, pady=10)
         TkLabel(self.root, text="w:", font=("Teja", 25)).grid(
             row=4, column=0, padx=20, pady=5, sticky="ew"
@@ -273,8 +347,14 @@ class Client(BaseUI):
         TkButton(
             self.root,
             text="Отправить супер хеш",
-            command=lambda: self.send(mode="super_hash"),
+            command=lambda: self.send("super_hash", self.client_socket),
         ).grid(row=5, column=5, padx=20, pady=10)
+        self.vote.grid(row=6, column=0)
+        TkButton(
+            self.root,
+            text="Отправить голос",
+            command=lambda: self.send("voting", self.client_socket),
+        ).grid(row=6, column=5)
 
     def receive(self) -> None:
         while True:
@@ -290,15 +370,22 @@ class Client(BaseUI):
                     else:
                         self.show_warning("Такого логина не существует")
                         self.insert_text("", "w_text")
+                if data["title"] == "super_hash_answer":
+                    if data["data"] == "":
+                        continue
+                        # проверка не пройдена
+                    self.serverOpenKey = eval(data["data"])
+
+                    ...
             except OSError:
                 break
 
-    def send(self, mode: str, data=None) -> None:
+    def send(self, mode: str, socket, data=None) -> None:
         if mode == "check_login":
             login = self.get_text_entry("login_text")
             if login:
                 data = json.dumps({"title": "check_login", "login": login})
-                self.client_socket.send(bytes(data, encoding="utf-8"))
+                socket.send(bytes(data, encoding="utf-8"))
                 time.sleep(0.2)
             else:
                 self.show_warning("Необходимо ввести логин")
@@ -315,8 +402,18 @@ class Client(BaseUI):
                 password_w = password + w.strip()
                 h = hashlib.sha1(password_w.encode()).hexdigest()
                 data = json.dumps({"title": "super_hash", "login": login, "h": h})
-                self.client_socket.send(bytes(data, encoding="utf-8"))
+                socket.send(bytes(data, encoding="utf-8"))
                 time.sleep(0.2)
+        if mode == "voting":
+            vote = int(self.vote.get())
+            if vote < 1 or vote > 3:
+                return
+            if self.serverOpenKey is None:
+                return
+            vote = voting.CreateShadowedVote(vote, 10000, self.serverOpenKey)
+            socket.send(
+                bytes(json.dumps({"title": mode, "vote": vote}), encoding="utf-8")
+            )
 
     def run_app(self) -> None:
         super().run_app()
