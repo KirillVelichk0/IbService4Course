@@ -1,5 +1,4 @@
 from prime_numbers import generate_prime_numbers
-from RSA import Rsa
 
 
 def CreateShadowedVote(userVote: int, minShadowNum: int, openKey: tuple) -> int:

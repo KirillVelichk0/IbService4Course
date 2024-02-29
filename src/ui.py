@@ -290,22 +290,25 @@ class Server(BaseUI):
                     self.show_warning("Супер хеши не совпадают")
                     self.send("super_hash_answer", client, "")
             if data["title"] == "voting":
-                with self.authMutex:
-                    if client not in self.authed_users:
-                        continue
-                vote_res = handle_new_vote(int(data["vote"]))
-                global mutex
-                global votingIsActive
-                if vote_res[0]:
-                    votesFinal = "Не удалось определиться"
-                    if vote_res[1][0] > vote_res[1][1]:
-                        votesFinal = "Большинство проголовало за"
-                    elif vote_res[1][0] < vote_res[1][1]:
-                        votesFinal = "Большинство проголосовало против"
-                    self.show_info(votesFinal)
-                    with mutex:
-                        votingIsActive = False
-                print(vote_res)
+                try:
+                    with self.authMutex:
+                        if client not in self.authed_users:
+                            continue
+                    vote_res = handle_new_vote(int(data["vote"]))
+                    global mutex
+                    global votingIsActive
+                    if vote_res[0]:
+                        votesFinal = "Не удалось определиться"
+                        if vote_res[1][0] > vote_res[1][1]:
+                            votesFinal = "Большинство проголовало за"
+                        elif vote_res[1][0] < vote_res[1][1]:
+                            votesFinal = "Большинство проголосовало против"
+                        self.show_info(votesFinal)
+                        with mutex:
+                            votingIsActive = False
+                    print(vote_res)
+                except Exception as e:
+                    self.show_warning("Голосование не начато")
 
     def send(self, mode: str, socket, data: str | None = None) -> None:
         if data is None:
@@ -317,13 +320,12 @@ class Server(BaseUI):
             else:
                 data = json.dumps({"title": "login_answer", "result": False})
             socket.send(bytes(data, encoding="utf-8"))
-            time.sleep(0.2)
+            # time.sleep(0.2)
         if mode == "super_hash_answer":
             # data must be json string
             data = json.dumps({"title": mode, "data": data})
             socket.send(bytes(data, encoding="utf-8"))
-            time.sleep(0.2)
-            ...
+            # time.sleep(0.2)
 
     def run_app(self) -> None:
         super().run_app()
@@ -382,8 +384,6 @@ class Client(BaseUI):
                         continue
                         # проверка не пройдена
                     self.serverOpenKey = eval(data["data"])
-
-                    ...
             except OSError:
                 break
 
@@ -393,7 +393,7 @@ class Client(BaseUI):
             if login:
                 data = json.dumps({"title": "check_login", "login": login})
                 socket.send(bytes(data, encoding="utf-8"))
-                time.sleep(0.2)
+                # time.sleep(0.2)
             else:
                 self.show_warning("Необходимо ввести логин")
         if mode == "super_hash":
